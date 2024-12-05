@@ -14,7 +14,7 @@ void setUp(void) {
 }
 
 void tearDown(void) {
-    pthread_mutex_destroy(&test_buffer.mutex);
+    mtx_destroy(&test_buffer.mutex);
 }
 
 void test_buffer_initialization(void) {
@@ -25,7 +25,7 @@ void test_buffer_initialization(void) {
     TEST_ASSERT_EQUAL_UINT32(0, buffer.read_index);
     TEST_ASSERT_EQUAL_UINT32(0, buffer.write_index);
 
-    pthread_mutex_destroy(&buffer.mutex);
+    mtx_destroy(&buffer.mutex);
 }
 
 void test_single_write_read(void) {
