@@ -2,75 +2,111 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <unistd.h>
+#include <threads.h>
 
 void circular_buffer_init(CircularBuffer_t* const buffer) {
-    if (NULL == buffer) {
+    if (buffer == NULL) {
         return;
     }
 
     buffer->write_index = 0U;
     buffer->read_index = 0U;
     buffer->count = 0U;
-    pthread_mutex_init(&buffer->mutex, NULL);
+    mtx_init(&buffer->mutex, mtx_plain);
 }
 
 bool circular_buffer_write(CircularBuffer_t* const buffer, const float value) {
     bool result = false;
 
-    if (NULL == buffer) {
+    if (buffer == NULL) {
         return false;
     }
 
-    pthread_mutex_lock(&buffer->mutex);
+    mtx_lock(&buffer->mutex);
 
     if (buffer->count < BUFFER_SIZE) {
+        // Normal write when buffer is not full
         buffer->temperatures[buffer->write_index] = value;
         buffer->write_index = (buffer->write_index + 1U) % BUFFER_SIZE;
         buffer->count++;
         result = true;
+    } else {
+        // When buffer is full, overwrite the oldest data
+        buffer->temperatures[buffer->write_index] = value;
+        buffer->write_index = (buffer->write_index + 1U) % BUFFER_SIZE;
+        buffer->read_index = (buffer->read_index + 1U) % BUFFER_SIZE;
+
+        // Error tracking is optional, uncomment if needed
+        // buffer->last_error = ERROR_BUFFER_OVERFLOW;
+        // fprintf(stderr, "Buffer full: Overwriting oldest data\n");
+
+        result = true;
     }
 
-    pthread_mutex_unlock(&buffer->mutex);
+    mtx_unlock(&buffer->mutex);
     return result;
 }
-
 bool circular_buffer_read(CircularBuffer_t* const buffer, float* const value) {
     bool result = false;
 
-    if ((NULL == buffer) || (NULL == value)) {
+    if ((buffer == NULL) || (value == NULL)) {
         return false;
     }
 
-    pthread_mutex_lock(&buffer->mutex);
+    mtx_lock(&buffer->mutex);
 
     if (buffer->count > 0U) {
         *value = buffer->temperatures[buffer->read_index];
         buffer->read_index = (buffer->read_index + 1U) % BUFFER_SIZE;
         buffer->count--;
         result = true;
+    } else {
+        buffer->last_error = ERROR_BUFFER_UNDERFLOW;
+        fprintf(stderr, "Error: Buffer underflow - No temperatures to read\n");
     }
 
-    pthread_mutex_unlock(&buffer->mutex);
+    mtx_unlock(&buffer->mutex);
     return result;
 }
 
 void display_buffer_contents(CircularBuffer_t* const buffer) {
-    float temperature;
-    uint32_t reading_count = 0U;
-
-    if (NULL == buffer) {
+    if (buffer == NULL) {
         return;
     }
 
     printf("\nCurrent Buffer Contents:\n");
 
-    while (circular_buffer_read(buffer, &temperature)) {
-        printf("Reading %u: %.2f°C\n", ++reading_count, temperature);
+    mtx_lock(&buffer->mutex);
+
+    if (buffer->count == 0) {
+        printf("Buffer is empty\n");
+    } else {
+        uint32_t current_index = buffer->read_index;
+        for (uint32_t i = 0; i < buffer->count; i++) {
+            printf("Reading %u: %.2f°C\n", i + 1, buffer->temperatures[current_index]);
+            current_index = (current_index + 1U) % BUFFER_SIZE;
+        }
     }
 
-    if (0U == reading_count) {
-        printf("Buffer is empty\n");
+    mtx_unlock(&buffer->mutex);
+}
+
+void display_buffer_error(CircularBuffer_t* const buffer) {
+    if (buffer == NULL) {
+        return;
+    }
+
+    switch (buffer->last_error) {
+        case ERROR_BUFFER_OVERFLOW:
+            fprintf(stderr, "Last error: Buffer Overflow\n");
+        break;
+        case ERROR_BUFFER_UNDERFLOW:
+            fprintf(stderr, "Last error: Buffer Underflow\n");
+        break;
+        case ERROR_NONE:
+        default:
+            printf("No errors detected\n");
+        break;
     }
 }
 
@@ -78,20 +114,12 @@ float simulate_temperature_reading(void) {
     return 20.0F + ((float)rand() / (float)RAND_MAX) * 10.0F;
 }
 
-void sleep_until_next_period(struct timespec* next_period, time_t interval_sec) {
-    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, next_period, NULL);
-    next_period->tv_sec += interval_sec;
-}
-
-void* sensor_thread(void* arg) {
+int sensor_thread(void* arg) {
     ThreadArgs_t* thread_args = (ThreadArgs_t*)arg;
-    struct timespec next_period;
     time_t current_time;
     struct tm* time_info;
 
-    clock_gettime(CLOCK_MONOTONIC, &next_period);
-
-    while (*(thread_args->running)) {
+    while (atomic_load(thread_args->running)) {
         float temperature = simulate_temperature_reading();
 
         if (circular_buffer_write(thread_args->buffer, temperature)) {
@@ -104,23 +132,21 @@ void* sensor_thread(void* arg) {
                    temperature);
         }
 
-        sleep_until_next_period(&next_period, SENSOR_READ_INTERVAL_SEC);
+        thrd_sleep(&(struct timespec){.tv_sec = SENSOR_READ_INTERVAL_SEC}, NULL);
     }
 
-    return NULL;
+    return 0;
 }
 
-void* display_thread(void* arg) {
+int display_thread(void* arg) {
     ThreadArgs_t* thread_args = (ThreadArgs_t*)arg;
-    struct timespec next_period;
 
-    clock_gettime(CLOCK_MONOTONIC, &next_period);
-
-    while (*(thread_args->running)) {
+    while (atomic_load(thread_args->running)) {
         display_buffer_contents(thread_args->buffer);
+        display_buffer_error(thread_args->buffer);
 
-        sleep_until_next_period(&next_period, DISPLAY_INTERVAL_SEC);
+        thrd_sleep(&(struct timespec){.tv_sec = DISPLAY_INTERVAL_SEC}, NULL);
     }
 
-    return NULL;
+    return 0;
 }
